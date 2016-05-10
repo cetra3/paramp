@@ -121,7 +121,6 @@ fn create_module_file(file: ZipFile, output_dir: &str) {
         match line {
             Ok(property) => {
 
-
                 let components: Vec<&str> = property.split("=").collect();
                 if components.len() == 2 {
 
