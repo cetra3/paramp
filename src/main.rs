@@ -14,21 +14,44 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     match args.len() {
-        3 => generate_output_from_yaml(&args[1], &args[2]),
+        2 => generate_entirely_from_yaml(&args[1]),
+        3 => generate_from_yaml_with_output(&args[1], &args[2]),
         _ => {
             println!("PARAMP: Generate an AMP directory for claspath loading");
-            println!("Usage: {} source.yaml target_dir", args[0])
+            println!("Usage: {} source.yaml <target_dir>", args[0])
         }
     }
 
 }
 
-fn generate_output_from_yaml(input_file: &str, output_dir: &str) {
+fn generate_entirely_from_yaml(input_file: &str) {
 
+
+    match read_file(resolve_file(input_file).unwrap()) {
+        Ok(contents) => {
+            let input = YamlLoader::load_from_str(&contents).unwrap();
+
+            match &input[0]["output_dir"] {
+                &yaml::Yaml::String(ref output_dir) => {
+
+                    generate_from_yaml_with_output(input_file, output_dir);
+
+                }
+                _ => { println!("Could not find an output_dir property in input yaml file, specify an output directory with `output_dir` on the command line or within the yaml file");}
+            }
+
+        },
+        _ => {}
+    }
+
+
+}
+
+fn generate_from_yaml_with_output(input_file: &str, output_dir: &str) {
 
     match fs::remove_dir_all(output_dir) {
         Ok(_) => {
-            println!("  Cleaning dir: {}", output_dir);
+            println!("   Clearing dir: {}", output_dir);
         },
         _ => {}
     }
@@ -38,14 +61,13 @@ fn generate_output_from_yaml(input_file: &str, output_dir: &str) {
         Ok(contents) => {
             let input = YamlLoader::load_from_str(&contents).unwrap();
 
-
-            match &input[0]["amps"] {
+            match &input[0]["files"] {
                 &yaml::Yaml::Array(ref v) => {
                     for amp in v {
 
                         let amp = amp.as_str().unwrap();
 
-                        println!("Extracting amp: {}", amp);
+                        println!("Extracting file: {}", amp);
 
                         generate_output(amp, output_dir);
                     }
@@ -91,7 +113,9 @@ fn generate_output(input_file: &str, output_dir: &str) {
             let mut change_filename = String::from(format!("/{}",file.name()));
 
             for (from, to) in &file_map {
-                change_filename = change_filename.replace(from, to);
+                if change_filename.starts_with(from) {
+                    change_filename = format!("{}{}", to , &change_filename[from.len()..]);
+                }
             }
 
             let new_file = create_file_and_dirs(&*format!("{}/{}", output_dir, change_filename));
@@ -141,6 +165,9 @@ fn create_module_file(file: ZipFile, output_dir: &str) {
 
             match new_file {
                 Ok(mut file_handle) => {
+
+                    output_content.push_str("module.installState=INSTALLED\n");
+
                     file_handle.write(&output_content.into_bytes()).unwrap();
                 },
                 _ => {}
