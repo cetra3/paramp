@@ -17,15 +17,13 @@ fn main() {
         2 => generate_entirely_from_yaml(&args[1]),
         3 => generate_from_yaml_with_output(&args[1], &args[2]),
         _ => {
-            println!("PARAMP: Generate an AMP directory for claspath loading");
+            println!("PARAMP: Generate an Alfresco deployment with modules");
             println!("Usage: {} source.yaml <target_dir>", args[0])
         }
     }
-
 }
 
 fn generate_entirely_from_yaml(input_file: &str) {
-
 
     match read_file(resolve_file(input_file).unwrap()) {
         Ok(contents) => {
@@ -55,7 +53,6 @@ fn generate_from_yaml_with_output(input_file: &str, output_dir: &str) {
         },
         _ => {}
     }
-
 
     match read_file(resolve_file(input_file).unwrap()) {
         Ok(contents) => {
