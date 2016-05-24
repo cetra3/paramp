@@ -145,10 +145,13 @@ fn create_module_file(file: ZipFile, output_dir: &str) {
                 let components: Vec<&str> = property.split("=").collect();
                 if components.len() == 2 {
 
-                    output_content.push_str(&*format!("{}={}\n", components[0], components[1]));
+                    let name = components[0].trim();
+                    let value = components[1].trim();
 
-                    if components[0] == "module.id" {
-                        output_file = Some(format!("{}/WEB-INF/classes/alfresco/module/{}/module.properties", output_dir, components[1]));
+                    output_content.push_str(&*format!("{}={}\n", name, value));
+
+                    if name == "module.id" {
+                        output_file = Some(format!("{}/WEB-INF/classes/alfresco/module/{}/module.properties", output_dir, value));
                     }
                 }
             },
