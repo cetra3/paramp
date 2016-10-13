@@ -2,16 +2,26 @@ extern crate zip;
 extern crate yaml_rust;
 extern crate clap;
 extern crate crypto;
+extern crate rustc_serialize;
+extern crate semver;
+extern crate regex;
+extern crate toml;
+extern crate memmap;
 
 #[macro_use]
 extern crate hyper;
 
+#[macro_use]
+extern crate lazy_static;
+
+use std::env;
 use yaml_rust::{Yaml,YamlLoader};
 use zip::read::{ZipArchive, ZipFile};
 use std::fs::{self, File};
-use std::path::Path;
-use std::io::{copy, Write, Read, BufReader, BufRead, Error, ErrorKind, Result};
+use std::path::{Path, PathBuf};
+use std::io::{self,copy, Write, Read, BufReader, BufRead, Error, ErrorKind};
 use std::collections::{HashMap, HashSet};
+
 
 use crypto::md5::Md5;
 use crypto::digest::Digest;
@@ -22,8 +32,36 @@ use hyper::status::StatusCode;
 
 use clap::{Arg, App};
 
+use rustc_serialize::{json, Decodable, Decoder};
+use semver::Version;
+
+use regex::Regex;
+
+use memmap::{Mmap, Protection};
+
 header! { (Token, "TOKEN") => [String] }
 
+lazy_static! {
+
+    /*
+        Let's try deal with Alfresco's weird numbering!
+    */
+
+    static ref MAJOR_MINOR_PATCH_MINI: Regex = {
+        Regex::new(r"(?P<major>\d)\.(?P<minor>\d)\.(?P<patch>\d).(?P<mini>\d)").unwrap()
+    };
+
+    static ref MAJOR_MINOR_PRE: Regex = {
+        Regex::new(r"(?P<major>\d)\.(?P<minor>\d)-(?P<pre>.*)").unwrap()
+    };
+
+    static ref MAJOR_MINOR: Regex = {
+        Regex::new(r"(?P<major>\d)\.(?P<minor>\d)").unwrap()
+    };
+
+}
+
+#[derive(Debug, Clone, RustcDecodable, RustcEncodable, PartialEq, Eq, PartialOrd, Ord)]
 struct AmpModule {
     vendor: String,
 
@@ -33,6 +71,45 @@ struct AmpModule {
 
     module_type: String
 
+}
+
+#[derive (Debug, Clone, RustcDecodable)]
+struct Config {
+    url: String,
+    token: String,
+    matchers: Vec<AmpMatcher>
+}
+
+#[derive (Debug, Clone)]
+struct AmpMatcher {
+    vendor: String,
+    name: String,
+    regex: Regex,
+}
+
+impl Decodable for AmpMatcher {
+    fn decode<D: Decoder>(d: &mut D) -> Result<AmpMatcher, D::Error> {
+
+        d.read_struct("AmpMatcher", 3, |d| {
+            let vendor = try!(d.read_struct_field("vendor", 0, |d| { d.read_str() }));
+            let name = try!(d.read_struct_field("name", 0, |d| { d.read_str() }));
+            let regex_raw = try!(d.read_struct_field("regex", 0, |d| { d.read_str() }));
+            let regex = Regex::new(&regex_raw).unwrap();
+
+            Ok(AmpMatcher{
+                vendor: vendor,
+                name: name,
+                regex: regex
+            })
+        })
+    }
+}
+
+
+#[derive(Debug)]
+struct VersionPair {
+    original: String,
+    version: Version
 }
 
 impl AmpModule{
@@ -51,11 +128,18 @@ impl AmpModule{
 
 impl fmt::Display for AmpModule {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{}:{}:{}", self.vendor, self.name, self.version, self.module_type)
+        if self.module_type != "" {
+            write!(f, "{}:{}:{}:{}", self.vendor, self.name, self.version, self.module_type)
+        } else {
+            write!(f, "{}:{}:{}", self.vendor, self.name, self.version)
+        }
+
+
     }
 }
 
 fn main() {
+
 
     let matches = App::new("Paramp")
         .version("1.0.0")
@@ -80,15 +164,20 @@ fn main() {
             .help("URL of Packages server")
             .short("u")
             .takes_value(true))
+        .arg(Arg::with_name("check")
+            .help("Check for latest versions")
+            .short("c"))
+        .arg(Arg::with_name("refresh")
+            .help("When Checking: Refresh older formatted yaml files")
+            .short("r"))
+        .arg(Arg::with_name("dev")
+            .help("When Checking: Include Non-QA Passed modules")
+            .short("d"))
         .get_matches();
 
     let input_file = matches.value_of("yaml_file").unwrap();
 
     let yaml = get_yaml(input_file);
-
-    let output_dir = matches.value_of("output_dir")
-        .map(|dir| String::from(dir))
-        .unwrap_or_else(|| get_yaml_string(&yaml, "output_dir").expect("Could not get target directory from YAML file"));
 
     let token: Option<String> = matches.value_of("token")
         .map(|token| String::from(token))
@@ -98,32 +187,229 @@ fn main() {
         .map(|token| String::from(token))
         .or(get_yaml_string(&yaml, "type"));
 
-
-    let mut files = Vec::new();
-
-    if module_type.is_some() && token.is_some() {
+    if matches.is_present("check") {
 
         let url: String = matches.value_of("url")
             .map(|token| String::from(token))
             .or(get_yaml_string(&yaml, "url"))
             .unwrap_or(String::from("https://repo.parashift.com.au"));
 
-        let modules = get_yaml_string_list(&yaml, "modules");
+        let mut modules: Vec<AmpModule> = Vec::new();
 
-        files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap(), &url));
+        if matches.is_present("refresh") {
 
+            let mut default_config_file = env::home_dir().unwrap_or(PathBuf::new());
+            default_config_file.push(".parelease");
+            //default to oldschool
+            match File::open(default_config_file) {
+                Ok(file) => {
+
+                    println!("Refreshing from older format\n");
+
+                    let config_string = read_file(file).unwrap();
+                    let config: Config = toml::decode_str(&config_string).unwrap();
+
+                    modules.append(&mut get_old_versions(&yaml, &config));
+
+                    println!("-\n");
+
+                },
+                _ => ()
+
+            }
+        }
+
+        modules.append(&mut get_yaml_string_list(&yaml, "alfresco_modules").iter().map(|module| AmpModule::new(&module, "")).collect());
+        modules.sort();
+        modules.dedup();
+
+        let include_dev: bool = matches.is_present("dev") || get_yaml_bool(&yaml, "development").unwrap_or(false);
+
+        if modules.len() > 0 {
+            if include_dev {
+                println!("Checking versions (Dev included)\n");
+            } else {
+                println!("Checking versions\n");
+            }
+
+
+            format_module_list(check_versions(&url, modules, include_dev))
+        } else {
+            println!("No modules found in yaml file!");
+
+        }
+
+    } else {
+
+        let output_dir = matches.value_of("output_dir")
+            .map(|dir| String::from(dir))
+            .unwrap_or_else(|| get_yaml_string(&yaml, "output_dir").expect("Could not get target directory from YAML file"));
+
+        let mut files = Vec::new();
+
+        if module_type.is_some() && token.is_some() {
+
+            let url: String = matches.value_of("url")
+                .map(|token| String::from(token))
+                .or(get_yaml_string(&yaml, "url"))
+                .unwrap_or(String::from("https://repo.parashift.com.au"));
+
+            let modules = get_yaml_string_list(&yaml, "alfresco_modules");
+
+            files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap(), &url));
+
+        }
+
+        match fs::remove_dir_all(&output_dir) {
+            Ok(_) => {
+
+                println!("Clearing dir: {}", output_dir);
+            },
+            _ => {}
+        }
+
+        files.append(&mut get_yaml_string_list(&yaml, "files"));
+
+        output_files(files, &output_dir);
     }
+}
 
-    match fs::remove_dir_all(&output_dir) {
-        Ok(_) => {
-            println!("Clearing dir: {}", output_dir);
+fn resolve_module(file_name: &str, config: &Config) -> Option<AmpModule> {
+
+    for matcher in config.matchers.iter() {
+        match matcher.regex.captures(file_name) {
+            Some(captured_values) => {
+
+                let version = captured_values.name("version").unwrap();
+
+                return Some(AmpModule {
+                    vendor: matcher.vendor.clone(),
+                    name: matcher.name.clone(),
+                    version: String::from(version),
+                    module_type: String::from("")
+                })
+            },
+            None => ()
+        }
+    }
+    None
+}
+
+fn get_type_version(yaml: &Yaml, module_type: &str) -> Vec<String> {
+    match yaml["modules_for_alfresco"][module_type] {
+        Yaml::Array(ref array) => {
+            array.into_iter().map(|value| String::from(value.as_str().unwrap())).collect()
         },
-        _ => {}
+        _ => Vec::new()
+    }
+}
+
+fn get_old_versions(yaml: &Yaml, config: &Config) -> Vec<AmpModule> {
+
+    let mut return_vec: Vec<AmpModule> = Vec::new();
+
+    let mut file_names: Vec<String> = Vec::new();
+
+    file_names.append(&mut get_type_version(yaml, "repo"));
+    file_names.append(&mut get_type_version(yaml, "share"));
+
+    for candidate in file_names.iter() {
+        match resolve_module(candidate, config) {
+            Some(module) => {
+                return_vec.push(module);
+            },
+            None => {
+                println!("Could not convert filename '{}' to a known module", candidate);
+            }
+        }
     }
 
-    files.append(&mut get_yaml_string_list(&yaml, "files"));
+    return_vec.sort();
+    return_vec.dedup();
 
-    output_files(files, &output_dir);
+
+    return_vec
+}
+
+fn format_module_list(modules: Vec<AmpModule>) {
+
+    println!("\nPaste the following into your yaml file:\n\n```");
+    println!("alfresco_modules:");
+
+    for module in modules.iter() {
+        println!("  - {}:{}:{}", module.vendor, module.name, module.version);
+    }
+
+    println!("```");
+
+}
+
+fn check_versions(url: &str, modules: Vec<AmpModule>, include_dev: bool) -> Vec<AmpModule> {
+
+    let mut return_modules: Vec<AmpModule> = Vec::new();
+
+    let client = Client::new();
+
+    for module in modules.into_iter() {
+        let submit_url = match include_dev {
+            true => format!("{}/module/{}/{}?dev=true", url, module.vendor, module.name),
+            false => format!("{}/module/{}/{}", url, module.vendor, module.name)
+        };
+
+        let mut response = client.get(&submit_url)
+            .send()
+            .unwrap();
+
+        match response.status {
+            StatusCode::Ok => {
+
+                let mut response_body = String::new();
+
+                response.read_to_string(&mut response_body).expect("Could not read response");
+
+                let existing_version = get_version(&module.version);
+
+                let version_array: Vec<String> = json::decode(&response_body).unwrap();
+
+                let versions_found = version_array.len() > 0;
+
+                let mut versions: Vec<VersionPair> = version_array.iter()
+                    .map(|version| get_version(&version))
+                    .filter(|pair| pair.version.gt(&existing_version.version))
+                    .collect();
+
+                if versions.len() > 0 {
+
+                    versions.sort_by(| left, right | left.version.cmp(&right.version).reverse());
+
+                    let ref candidate = versions[0];
+
+                    println!("Module '{}' can be upgraded to version '{}'", module, candidate.original);
+
+                    return_modules.push(AmpModule {
+                        name: module.name,
+                        module_type: module.module_type,
+                        version: candidate.original.clone(),
+                        vendor: module.vendor
+                    });
+
+
+                } else {
+                    if versions_found {
+                        return_modules.push(module);
+                    } else {
+                        println!("Could not find any versions for '{}'", module);
+                    }
+
+                }
+
+
+            },
+            status => panic!("Could not get '{}' ({})", module, status)
+        }
+    }
+
+    return return_modules;
 
 }
 
@@ -191,21 +477,82 @@ fn download_files(modules: &Vec<String>, module_type: &str, token: &str, url: &s
 
 }
 
-fn compare_checksum(mut file: File, checksum: String) -> bool {
+fn compare_checksum(file: File, checksum: String) -> bool {
 
     let mut sh = Md5::new();
 
-    let mut buf = Vec::new();
+    let input_map = Mmap::open(&file, Protection::Read).expect("Failed to create file map for reading");
 
-    file.read_to_end(&mut buf).unwrap();
+    //Unsafety comes from the fact that if someone modifies the file while it's being read
+    let bytes: &[u8] = unsafe { input_map.as_slice() };
 
-    sh.input(&buf);
+    sh.input(&bytes);
 
     let file_sum = sh.result_str();
 
     return file_sum == checksum;
 
 }
+
+fn get_version(input: &str) -> VersionPair {
+
+    match Version::parse(input) {
+        Ok(version) => VersionPair {
+            original: String::from(input),
+            version: version
+        },
+        _ => {
+
+            match MAJOR_MINOR_PATCH_MINI.captures(input) {
+                Some(values) => {
+
+                    let doctored_version = format!("{}.{}.{}-{}", values.name("major").unwrap(), values.name("minor").unwrap(), values.name("patch").unwrap(), values.name("mini").unwrap());
+
+                    return VersionPair {
+                        original: String::from(input),
+                        version: Version::parse(&doctored_version).unwrap()
+                    }
+                },
+                _ => ()
+            }
+
+            match MAJOR_MINOR_PRE.captures(input) {
+                Some(values) => {
+
+                    let doctored_version = format!("{}.{}.0-{}", values.name("major").unwrap(), values.name("minor").unwrap(), values.name("pre").unwrap());
+
+                    return VersionPair {
+                        original: String::from(input),
+                        version: Version::parse(&doctored_version).unwrap()
+                    }
+                },
+                _ => ()
+            }
+
+            match MAJOR_MINOR.captures(input) {
+                Some(values) => {
+
+                    let doctored_version = format!("{}.{}.0", values.name("major").unwrap(), values.name("minor").unwrap());
+
+                    return VersionPair {
+                        original: String::from(input),
+                        version: Version::parse(&doctored_version).unwrap()
+                    }
+                },
+                _ => {
+
+                    return VersionPair {
+                        original: String::from(input),
+                        version: Version::parse("0.0.0").unwrap()
+                    }
+                }
+            }
+        }
+
+    }
+
+}
+
 
 fn get_yaml_string_list(yaml: &Yaml, value: &str) -> Vec<String> {
     match yaml[value] {
@@ -215,6 +562,13 @@ fn get_yaml_string_list(yaml: &Yaml, value: &str) -> Vec<String> {
         _ => Vec::new()
     }
 
+}
+
+fn get_yaml_bool(yaml:&Yaml, value:&str) -> Option<bool> {
+    match yaml[value] {
+        Yaml::Boolean(ref yaml_value) => Some(yaml_value.clone()),
+        _ => None
+    }
 }
 
 fn get_yaml_string(yaml: &Yaml, value: &str) -> Option<String> {
@@ -341,7 +695,7 @@ fn create_module_file(file: ZipFile, output_dir: &str) {
 
 }
 
-fn create_file_and_dirs(file: &str) -> Result<File> {
+fn create_file_and_dirs(file: &str) -> io::Result<File> {
     create_parent_dirs(file);
     return File::create(file);
 }
@@ -397,7 +751,7 @@ fn get_default_map() -> HashMap<String,String> {
     return_map
 }
 
-fn read_file(mut file: File) -> Result<String> {
+fn read_file(mut file: File) -> io::Result<String> {
     let mut s = String::new();
     match file.read_to_string(&mut s) {
         Ok(_) => Ok(s),
@@ -406,7 +760,7 @@ fn read_file(mut file: File) -> Result<String> {
     }
 }
 
-fn resolve_file(search_path: &str) -> Result<File> {
+fn resolve_file(search_path: &str) -> io::Result<File> {
     let path = Path::new(search_path);
     match path.exists(){
         true => File::open(&path),
