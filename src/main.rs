@@ -250,17 +250,19 @@ fn main() {
 
         let mut files = Vec::new();
 
-        if module_type.is_some() && token.is_some() {
+        if module_type.is_some() {
 
             let url: String = matches.value_of("url")
-                .map(|token| String::from(token))
+                .map(|url| String::from(url))
                 .or(get_yaml_string(&yaml, "url"))
                 .unwrap_or(String::from("https://repo.parashift.com.au"));
 
             let modules = get_yaml_string_list(&yaml, "alfresco_modules");
 
-            files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap(), &url));
+            files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap_or(String::from("")), &url));
 
+        } else {
+            println!("Skipping module download, no module type is set");
         }
 
         match fs::remove_dir_all(&output_dir) {
@@ -426,6 +428,8 @@ fn download_files(modules: &Vec<String>, module_type: &str, token: &str, url: &s
 
     for module in modules.into_iter().map(|module| AmpModule::new(module, module_type)) {
 
+        println!("Checking module:{}", module);
+
         let file_name = format!(".ampcache/{}-{}-{}-{}.amp", module.vendor, module.name, module.version, module.module_type);
 
         let submit_url = format!("{}/module/{}/{}/{}/{}", url, module.vendor, module.name, module.version, module.module_type);
@@ -484,17 +488,20 @@ fn compare_checksum(file: File, checksum: String) -> bool {
 
     let mut sh = Md5::new();
 
-    let input_map = Mmap::open(&file, Protection::Read).expect("Failed to create file map for reading");
+    match Mmap::open(&file, Protection::Read) {
+        Ok(input_map) => {
 
-    //Unsafety comes from the fact that if someone modifies the file while it's being read
-    let bytes: &[u8] = unsafe { input_map.as_slice() };
+            //Unsafety comes from the fact that if someone modifies the file while it's being read
+            let bytes: &[u8] = unsafe { input_map.as_slice() };
 
-    sh.input(&bytes);
+            sh.input(&bytes);
 
-    let file_sum = sh.result_str();
+            let file_sum = sh.result_str();
 
-    return file_sum == checksum;
-
+            return file_sum == checksum;
+        },
+        _ => false
+    }
 }
 
 fn get_version(input: &str) -> VersionPair {
