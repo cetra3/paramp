@@ -250,20 +250,24 @@ fn main() {
 
         let mut files = Vec::new();
 
-        if module_type.is_some() {
+        let modules = get_yaml_string_list(&yaml, "alfresco_modules");
 
-            let url: String = matches.value_of("url")
-                .map(|url| String::from(url))
-                .or(get_yaml_string(&yaml, "url"))
-                .unwrap_or(String::from("https://repo.parashift.com.au"));
+        if modules.len() > 0 {
+            if module_type.is_some() {
 
-            let modules = get_yaml_string_list(&yaml, "alfresco_modules");
+                let url: String = matches.value_of("url")
+                    .map(|url| String::from(url))
+                    .or(get_yaml_string(&yaml, "url"))
+                    .unwrap_or(String::from("https://repo.parashift.com.au"));
 
-            files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap_or(String::from("")), &url));
 
-        } else {
-            println!("Skipping module download, no module type is set");
+                files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap_or(String::from("")), &url));
+
+            } else {
+                println!("Skipping module download, no module type is set");
+            }
         }
+
 
         match fs::remove_dir_all(&output_dir) {
             Ok(_) => {
