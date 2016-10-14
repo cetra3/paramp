@@ -189,7 +189,7 @@ fn main() {
 
     if matches.is_present("check") {
 
-        let url: String = matches.value_of("url")
+        let mut url: String = matches.value_of("url")
             .map(|token| String::from(token))
             .or(get_yaml_string(&yaml, "url"))
             .unwrap_or(String::from("https://repo.parashift.com.au"));
@@ -208,6 +208,9 @@ fn main() {
 
                     let config_string = read_file(file).unwrap();
                     let config: Config = toml::decode_str(&config_string).unwrap();
+
+                    //Update the URL to the config file
+                    url = config.url.clone();
 
                     modules.append(&mut get_old_versions(&yaml, &config));
 
