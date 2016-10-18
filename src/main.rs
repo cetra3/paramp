@@ -345,8 +345,21 @@ fn format_module_list(modules: Vec<AmpModule>) {
     println!("\nPaste the following into your yaml file:\n\n```");
     println!("alfresco_modules:");
 
+    let mut enterprise_module: Option<AmpModule> = None;
+
     for module in modules.iter() {
-        println!("  - {}:{}:{}", module.vendor, module.name, module.version);
+        if module.vendor != "alfresco" || (module.name != "enterprise" && module.name != "community")  {
+            println!("  - {}:{}:{}", module.vendor, module.name, module.version);
+        } else {
+            enterprise_module = Some(module.clone());
+        }
+    }
+
+    match enterprise_module {
+        Some(module) => {
+            println!("  - {}:{}:{}", module.vendor, module.name, module.version);
+        },
+        _ => ()
     }
 
     println!("```");
