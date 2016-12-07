@@ -7,6 +7,7 @@ extern crate semver;
 extern crate regex;
 extern crate toml;
 extern crate memmap;
+extern crate rayon;
 
 #[macro_use]
 extern crate hyper;
@@ -21,6 +22,9 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::io::{self,copy, Write, Read, BufReader, BufRead, Error, ErrorKind};
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*;
+
+use std::sync::{Arc, Mutex};
 
 
 use crypto::md5::Md5;
@@ -439,65 +443,73 @@ fn download_files(modules: &Vec<String>, module_type: &str, token: &str, url: &s
 
     fs::create_dir_all(".ampcache").unwrap();
 
-    let mut return_files = Vec::new();
+    let mutex = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let client = Client::new();
+    modules.par_iter()
+        .map(|module| AmpModule::new(module, module_type))
+        .map(|module| {
 
-    for module in modules.into_iter().map(|module| AmpModule::new(module, module_type)) {
+            println!("Checking module:{}", module);
 
-        println!("Checking module:{}", module);
+            let client = Client::new();
 
-        let file_name = format!(".ampcache/{}-{}-{}-{}.amp", module.vendor, module.name, module.version, module.module_type);
+            let file_name = format!(".ampcache/{}-{}-{}-{}.amp", module.vendor, module.name, module.version, module.module_type);
 
-        let submit_url = format!("{}/module/{}/{}/{}/{}", url, module.vendor, module.name, module.version, module.module_type);
+            let submit_url = format!("{}/module/{}/{}/{}/{}", url, module.vendor, module.name, module.version, module.module_type);
 
-        let mut response = client.get(&submit_url)
-            .send()
-            .unwrap();
+            let mut response = client.get(&submit_url)
+                .send()
+                .unwrap();
 
-        match response.status {
-            StatusCode::Ok => {
-                let mut checksum = String::new();
+            match response.status {
+                StatusCode::Ok => {
+                    let mut checksum = String::new();
 
-                response.read_to_string(&mut checksum).expect("Could not read response");
+                    response.read_to_string(&mut checksum).expect("Could not read response");
 
-                if checksum.len() > 0 {
+                    if checksum.len() > 0 {
+                        let local_file = resolve_file(&file_name);
 
-                    let local_file = resolve_file(&file_name);
+                        if !local_file.is_ok() || !compare_checksum(local_file.unwrap(), checksum) {
+                            let mut new_file = create_file_and_dirs(&file_name).unwrap();
 
-                    if !local_file.is_ok() || !compare_checksum(local_file.unwrap(), checksum) {
+                            let mut file_dl = client.get(&*format!("{}.amp", submit_url))
+                                .header(Token(String::from(token)))
+                                .send()
+                                .unwrap();
 
-                        let mut new_file = create_file_and_dirs(&file_name).unwrap();
-
-                        let mut file_dl = client.get(&*format!("{}.amp", submit_url))
-                            .header(Token(String::from(token)))
-                            .send()
-                            .unwrap();
-
-                        match file_dl.status {
-                            StatusCode::Ok => {
-                                println!("Downloading '{}'", module);
-                                copy(&mut file_dl, &mut new_file).expect("Error saving file!");
-                            },
-                            status => panic!("Could not get '{}' ({})", module, status)
+                            match file_dl.status {
+                                StatusCode::Ok => {
+                                    println!("Downloading '{}'", module);
+                                    copy(&mut file_dl, &mut new_file).expect("Error saving file!");
+                                },
+                                status => panic!("Could not get '{}' ({})", module, status)
+                            }
                         }
 
+                        return Some(file_name);
+                    } else {
+                        panic!("Could not get '{}' (Invalid Server Checksum)", module)
                     }
-
-                    return_files.push(file_name);
-                } else {
-                    panic!("Could not get '{}' (Invalid Server Checksum)", module)
+                },
+                StatusCode::SeeOther => {
+                    println!("Skipping module '{}' (No '{}' component)", module, module_type);
+                    return None;
                 }
-
-            },
-            StatusCode::SeeOther => {
-                println!("Skipping module '{}' (No '{}' component)", module, module_type)
+                status => panic!("Could not get '{}' ({})", module, status)
             }
-            status => panic!("Could not get '{}' ({})", module, status)
-        }
-    }
+        })
+        .filter(|filename| *filename != None)
+        .for_each(|filename| {
 
-    return return_files
+            if let Some(name) = filename {
+                let mut files = mutex.lock().unwrap();
+                files.push(name);
+            }
+
+        });
+
+    return mutex.lock().unwrap().clone();
 
 }
 
