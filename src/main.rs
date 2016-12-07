@@ -146,7 +146,7 @@ fn main() {
 
 
     let matches = App::new("Paramp")
-        .version("1.0.0")
+        .version("1.1.0")
         .author("Peter Lesty <peter@parashift.com.au>")
         .about("Generate an Alfresco deployment with modules")
         .arg(Arg::with_name("yaml_file")
