@@ -7,7 +7,6 @@ extern crate semver;
 extern crate regex;
 extern crate toml;
 extern crate memmap;
-extern crate rayon;
 
 #[macro_use]
 extern crate hyper;
@@ -22,10 +21,6 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::io::{self,copy, Write, Read, BufReader, BufRead, Error, ErrorKind};
 use std::collections::{HashMap, HashSet};
-use rayon::prelude::*;
-
-use std::sync::{Arc, Mutex};
-
 
 use crypto::md5::Md5;
 use crypto::digest::Digest;
@@ -146,7 +141,7 @@ fn main() {
 
 
     let matches = App::new("Paramp")
-        .version("1.1.0")
+        .version("1.1.1")
         .author("Peter Lesty <peter@parashift.com.au>")
         .about("Generate an Alfresco deployment with modules")
         .arg(Arg::with_name("yaml_file")
@@ -443,9 +438,7 @@ fn download_files(modules: &Vec<String>, module_type: &str, token: &str, url: &s
 
     fs::create_dir_all(".ampcache").unwrap();
 
-    let mutex = Arc::new(Mutex::new(Vec::<String>::new()));
-
-    modules.par_iter()
+    modules.iter()
         .map(|module| AmpModule::new(module, module_type))
         .map(|module| {
 
@@ -500,16 +493,9 @@ fn download_files(modules: &Vec<String>, module_type: &str, token: &str, url: &s
             }
         })
         .filter(|filename| *filename != None)
-        .for_each(|filename| {
+        .map(|filename| filename.unwrap())
+        .collect::<Vec<String>>()
 
-            if let Some(name) = filename {
-                let mut files = mutex.lock().unwrap();
-                files.push(name);
-            }
-
-        });
-
-    return mutex.lock().unwrap().clone();
 
 }
 
