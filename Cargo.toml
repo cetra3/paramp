@@ -1,17 +1,17 @@
 [package]
 name = "paramp"
-version = "1.1.1"
+version = "1.1.2"
 authors = ["cetra3 <peter@parashift.com.au>"]
 
 [dependencies]
 zip = "0.1"
-yaml-rust = "*"
-clap = "*"
-hyper = "*"
-rust-crypto = "*"
-rustc-serialize = "*"
-semver = "*"
-regex = "*"
-lazy_static = "*"
-toml = "*"
-memmap = "*"
+yaml-rust = "0.3.3"
+clap = "2.10.4"
+hyper = "0.9.10"
+rust-crypto = "0.2.36"
+rustc-serialize = "0.3.19"
+semver = "0.1.20"
+regex = "0.1.77"
+lazy_static = "0.2.1"
+toml = "0.2.1"
+memmap = "0.4.0"
