@@ -18,7 +18,7 @@ extern crate lazy_static;
 use std::env;
 use yaml_rust::{Yaml,YamlLoader};
 use zip::read::{ZipArchive, ZipFile};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::io::{self,copy, Write, Read, BufReader, BufRead, Error, ErrorKind};
 use std::collections::{HashMap, HashSet};
@@ -632,7 +632,7 @@ fn generate_output(input_file: &str, output_dir: &str) {
     }
 
     if let Ok(mut manifest_file) = archive.by_name("META-INF/MANIFEST.MF") {
-        merge_manifests(&mut manifest_file, output_dir);
+        handle_manifests(&mut manifest_file, output_dir);
     }
 
 
@@ -659,12 +659,29 @@ fn generate_output(input_file: &str, output_dir: &str) {
     }
 }
 
-fn merge_manifests(file: &mut ZipFile, output_dir: &str) {
+/*
+  This function here is just so that Alfresco Share does not complain.
+*/
+
+fn handle_manifests(file: &mut ZipFile, output_dir: &str) {
 
     let output_file = format!("{}/{}", output_dir, file.name());
-    create_parent_dirs(&output_file);
 
-    if let Ok(mut file_handle) = OpenOptions::new().write(true).create(true).truncate(false).open(output_file){
+    //If the file exists, we check to see whether `Specification-Version:` is present.  If it is we don't override
+
+    if let Ok(existing_file) = File::open(&output_file) {
+        let reader = BufReader::new(existing_file);
+
+        for line in reader.lines() {
+            if let Ok(value)  = line {
+                if value.starts_with("Specification-Version:") {
+                    return;
+                }
+            }
+        }
+    }
+
+    if let Ok(mut file_handle) = create_file_and_dirs(&output_file) {
         copy(file, &mut file_handle).expect("Could not write manifest file");
     }
 
