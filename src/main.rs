@@ -7,6 +7,7 @@ extern crate semver;
 extern crate regex;
 extern crate toml;
 extern crate memmap;
+extern crate rayon;
 
 #[macro_use]
 extern crate hyper;
@@ -17,7 +18,7 @@ extern crate lazy_static;
 use std::env;
 use yaml_rust::{Yaml,YamlLoader};
 use zip::read::{ZipArchive, ZipFile};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::io::{self,copy, Write, Read, BufReader, BufRead, Error, ErrorKind};
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,8 @@ use semver::Version;
 use regex::Regex;
 
 use memmap::{Mmap, Protection};
+use rayon::prelude::*;
+
 
 header! { (Token, "TOKEN") => [String] }
 
@@ -56,6 +59,31 @@ lazy_static! {
 
     static ref MAJOR_MINOR: Regex = {
         Regex::new(r"(?P<major>\d)\.(?P<minor>\d)").unwrap()
+    };
+
+    static ref DEFAULT_FILEMAP: HashMap<String,String> = {
+
+        let mut file_map = HashMap::new();
+        file_map.insert(String::from("/config"),String::from("/WEB-INF/classes"));
+        file_map.insert(String::from("/lib"),String::from("/WEB-INF/lib"));
+        file_map.insert(String::from("/licenses"),String::from("/WEB-INF/licenses"));
+        file_map.insert(String::from("/web/jsp"),String::from("/jsp"));
+        file_map.insert(String::from("/web/css"),String::from("/css"));
+        file_map.insert(String::from("/web/images"),String::from("/images"));
+        file_map.insert(String::from("/web/scripts"),String::from("/scripts"));
+        file_map.insert(String::from("/web/php"),String::from("/"));
+
+        file_map
+    };
+
+    static ref EXCLUSION_MAP: HashSet<String> = {
+        let mut exclusion_map: HashSet<String> = HashSet::new();
+
+        exclusion_map.insert(String::from("file-mapping.properties"));
+        exclusion_map.insert(String::from("module.properties"));
+        exclusion_map.insert(String::from("META-INF/MANIFEST.MF"));
+
+        exclusion_map
     };
 
 }
@@ -140,8 +168,8 @@ impl fmt::Display for AmpModule {
 fn main() {
 
 
-    let matches = App::new("Paramp")
-        .version("1.1.2")
+    let matches = App::new("paramp")
+        .version("1.2.0")
         .author("Peter Lesty <peter@parashift.com.au>")
         .about("Generate an Alfresco deployment with modules")
         .arg(Arg::with_name("yaml_file")
@@ -268,12 +296,8 @@ fn main() {
         }
 
 
-        match fs::remove_dir_all(&output_dir) {
-            Ok(_) => {
-
-                println!("Clearing dir: {}", output_dir);
-            },
-            _ => {}
+        if let Ok(_) = fs::remove_dir_all(&output_dir) {
+            println!("Clearing dir: {}", output_dir);
         }
 
         files.append(&mut get_yaml_string_list(&yaml, "files"));
@@ -285,19 +309,15 @@ fn main() {
 fn resolve_module(file_name: &str, config: &Config) -> Option<AmpModule> {
 
     for matcher in config.matchers.iter() {
-        match matcher.regex.captures(file_name) {
-            Some(captured_values) => {
+        if let Some(captured_values) = matcher.regex.captures(file_name) {
+            let version = captured_values.name("version").unwrap();
 
-                let version = captured_values.name("version").unwrap();
-
-                return Some(AmpModule {
-                    vendor: matcher.vendor.clone(),
-                    name: matcher.name.clone(),
-                    version: String::from(version),
-                    module_type: String::from("")
-                })
-            },
-            None => ()
+            return Some(AmpModule {
+                vendor: matcher.vendor.clone(),
+                name: matcher.name.clone(),
+                version: String::from(version),
+                module_type: String::from("")
+            })
         }
     }
     None
@@ -344,21 +364,8 @@ fn format_module_list(modules: Vec<AmpModule>) {
     println!("\nPaste the following into your yaml file:\n\n```");
     println!("alfresco_modules:");
 
-    let mut enterprise_module: Option<AmpModule> = None;
-
     for module in modules.iter() {
-        if module.vendor != "alfresco" || (module.name != "enterprise" && module.name != "community")  {
-            println!("  - {}:{}:{}", module.vendor, module.name, module.version);
-        } else {
-            enterprise_module = Some(module.clone());
-        }
-    }
-
-    match enterprise_module {
-        Some(module) => {
-            println!("  - {}:{}:{}", module.vendor, module.name, module.version);
-        },
-        _ => ()
+        println!("  - {}:{}:{}", module.vendor, module.name, module.version);
     }
 
     println!("```");
@@ -438,7 +445,7 @@ fn download_files(modules: &Vec<String>, module_type: &str, token: &str, url: &s
 
     fs::create_dir_all(".ampcache").unwrap();
 
-    modules.iter()
+    modules.par_iter()
         .map(|module| AmpModule::new(module, module_type))
         .map(|module| {
 
@@ -528,50 +535,35 @@ fn get_version(input: &str) -> VersionPair {
         },
         _ => {
 
-            match MAJOR_MINOR_PATCH_MINI.captures(input) {
-                Some(values) => {
+            if let Some(values) = MAJOR_MINOR_PATCH_MINI.captures(input) {
+                let doctored_version = format!("{}.{}.{}-{}", values.name("major").unwrap(), values.name("minor").unwrap(), values.name("patch").unwrap(), values.name("mini").unwrap());
 
-                    let doctored_version = format!("{}.{}.{}-{}", values.name("major").unwrap(), values.name("minor").unwrap(), values.name("patch").unwrap(), values.name("mini").unwrap());
+                return VersionPair {
+                    original: String::from(input),
+                    version: Version::parse(&doctored_version).unwrap()
+                }
 
-                    return VersionPair {
-                        original: String::from(input),
-                        version: Version::parse(&doctored_version).unwrap()
-                    }
-                },
-                _ => ()
-            }
+            } else if let Some(values) = MAJOR_MINOR_PRE.captures(input) {
+                let doctored_version = format!("{}.{}.0-{}", values.name("major").unwrap(), values.name("minor").unwrap(), values.name("pre").unwrap());
 
-            match MAJOR_MINOR_PRE.captures(input) {
-                Some(values) => {
+                return VersionPair {
+                    original: String::from(input),
+                    version: Version::parse(&doctored_version).unwrap()
+                }
+            } else if let Some(values) = MAJOR_MINOR.captures(input) {
+                let doctored_version = format!("{}.{}.0", values.name("major").unwrap(), values.name("minor").unwrap());
 
-                    let doctored_version = format!("{}.{}.0-{}", values.name("major").unwrap(), values.name("minor").unwrap(), values.name("pre").unwrap());
-
-                    return VersionPair {
-                        original: String::from(input),
-                        version: Version::parse(&doctored_version).unwrap()
-                    }
-                },
-                _ => ()
-            }
-
-            match MAJOR_MINOR.captures(input) {
-                Some(values) => {
-
-                    let doctored_version = format!("{}.{}.0", values.name("major").unwrap(), values.name("minor").unwrap());
-
-                    return VersionPair {
-                        original: String::from(input),
-                        version: Version::parse(&doctored_version).unwrap()
-                    }
-                },
-                _ => {
-
-                    return VersionPair {
-                        original: String::from(input),
-                        version: Version::parse("0.0.0").unwrap()
-                    }
+                return VersionPair {
+                    original: String::from(input),
+                    version: Version::parse(&doctored_version).unwrap()
+                }
+            } else {
+                return VersionPair {
+                    original: String::from(input),
+                    version: Version::parse("0.0.0").unwrap()
                 }
             }
+
         }
 
     }
@@ -626,28 +618,28 @@ fn generate_output(input_file: &str, output_dir: &str) {
 
     let mut archive = ZipArchive::new(file).unwrap();
 
-    let mut file_map = get_default_map();
-
-    let exclusion_map = get_exclusion_map();
-
-    match archive.by_name("file-mapping.properties") {
+    let file_map = match archive.by_name("file-mapping.properties") {
         Ok(amp_map) => {
-            file_map = decorate_map(amp_map);
+            decorate_map(amp_map)
         },
-        _ => {}
+        _ => {
+            DEFAULT_FILEMAP.clone()
+        }
+    };
+
+    if let Ok(module_file) = archive.by_name("module.properties") {
+        create_module_file(module_file, output_dir);
     }
 
-    match archive.by_name("module.properties") {
-        Ok(module_file) => {
-            create_module_file(module_file, output_dir);
-        },
-        _ => {}
+    if let Ok(mut manifest_file) = archive.by_name("META-INF/MANIFEST.MF") {
+        merge_manifests(&mut manifest_file, output_dir);
     }
+
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
 
-        if !exclusion_map.contains(file.name()) {
+        if !EXCLUSION_MAP.contains(file.name()) {
 
             let mut change_filename = String::from(format!("/{}",file.name()));
 
@@ -657,19 +649,25 @@ fn generate_output(input_file: &str, output_dir: &str) {
                 }
             }
 
-            let new_file = create_file_and_dirs(&*format!("{}/{}", output_dir, change_filename));
-
-            match new_file {
-                Ok(mut file_handle) => {
-                    copy(&mut file, &mut file_handle).unwrap();
-                    //println!("{}", change_filename);
-                },
-                _ => {}
+            if let Ok(mut file_handle) = create_file_and_dirs(&*format!("{}/{}", output_dir, change_filename)) {
+                copy(&mut file, &mut file_handle).unwrap();
             }
+
 
         }
 
     }
+}
+
+fn merge_manifests(file: &mut ZipFile, output_dir: &str) {
+
+    let output_file = format!("{}/{}", output_dir, file.name());
+    create_parent_dirs(&output_file);
+
+    if let Ok(mut file_handle) = OpenOptions::new().write(true).create(true).truncate(false).open(output_file){
+        copy(file, &mut file_handle).expect("Could not write manifest file");
+    }
+
 }
 
 fn create_module_file(file: ZipFile, output_dir: &str) {
@@ -681,41 +679,32 @@ fn create_module_file(file: ZipFile, output_dir: &str) {
     let mut output_content = String::new();
 
     for line in reader.lines() {
-        match line {
-            Ok(property) => {
 
-                let components: Vec<&str> = property.split("=").collect();
-                if components.len() == 2 {
+        if let Ok(property) = line {
+            let components: Vec<&str> = property.split("=").collect();
+            if components.len() == 2 {
 
-                    let name = components[0].trim();
-                    let value = components[1].trim();
+                let name = components[0].trim();
+                let value = components[1].trim();
 
-                    output_content.push_str(&*format!("{}={}\n", name, value));
+                output_content.push_str(&*format!("{}={}\n", name, value));
 
-                    if name == "module.id" {
-                        output_file = Some(format!("{}/WEB-INF/classes/alfresco/module/{}/module.properties", output_dir, value));
-                    }
+                if name == "module.id" {
+                    output_file = Some(format!("{}/WEB-INF/classes/alfresco/module/{}/module.properties", output_dir, value));
                 }
-            },
-            _ => {}
+            }
         }
+
     }
 
-    match output_file {
-        Some(file_name) => {
-            let new_file = create_file_and_dirs(&*file_name);
+    if let Some(file_name) = output_file {
 
-            match new_file {
-                Ok(mut file_handle) => {
+        if let Ok(mut file_handle) = create_file_and_dirs(&*file_name) {
+            output_content.push_str("module.installState=INSTALLED\n");
 
-                    output_content.push_str("module.installState=INSTALLED\n");
+            file_handle.write(&output_content.into_bytes()).unwrap();
+        }
 
-                    file_handle.write(&output_content.into_bytes()).unwrap();
-                },
-                _ => {}
-            }
-        },
-        _ => {}
     }
 
 }
@@ -732,7 +721,7 @@ fn create_parent_dirs(file: &str) {
 
 fn decorate_map(amp_map: ZipFile) -> HashMap<String, String> {
 
-    let mut return_map = get_default_map();
+    let mut return_map = DEFAULT_FILEMAP.clone();
 
     let reader = BufReader::new(amp_map);
 
@@ -751,37 +740,12 @@ fn decorate_map(amp_map: ZipFile) -> HashMap<String, String> {
     return_map
 }
 
-fn get_exclusion_map() -> HashSet<String> {
-    let mut return_set: HashSet<String> = HashSet::new();
-
-    return_set.insert(String::from("file-mapping.properties"));
-    return_set.insert(String::from("module.properties"));
-
-    return_set
-}
-
-fn get_default_map() -> HashMap<String,String> {
-
-    let mut return_map: HashMap<String,String> = HashMap::new();
-
-    return_map.insert(String::from("/config"),String::from("/WEB-INF/classes"));
-    return_map.insert(String::from("/lib"),String::from("/WEB-INF/lib"));
-    return_map.insert(String::from("/licenses"),String::from("/WEB-INF/licenses"));
-    return_map.insert(String::from("/web/jsp"),String::from("/jsp"));
-    return_map.insert(String::from("/web/css"),String::from("/css"));
-    return_map.insert(String::from("/web/images"),String::from("/images"));
-    return_map.insert(String::from("/web/scripts"),String::from("/scripts"));
-    return_map.insert(String::from("/web/php"),String::from("/"));
-
-    return_map
-}
-
 fn read_file(mut file: File) -> io::Result<String> {
     let mut s = String::new();
     match file.read_to_string(&mut s) {
         Ok(_) => Ok(s),
         Err(_) => Err(Error::new(ErrorKind::InvalidInput,
-                      "the file cannot be read"))
+                                 "the file cannot be read"))
     }
 }
 
@@ -790,7 +754,7 @@ fn resolve_file(search_path: &str) -> io::Result<File> {
     match path.exists(){
         true => File::open(&path),
         false =>
-                Err(Error::new(ErrorKind::NotFound,
-                              format!("the file at {} cannot be found", search_path)))
+            Err(Error::new(ErrorKind::NotFound,
+                           format!("the file at {} cannot be found", search_path)))
     }
 }
