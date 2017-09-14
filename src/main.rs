@@ -153,7 +153,7 @@ fn main() {
 
 
     let matches = App::new("paramp")
-        .version("1.2.0")
+        .version("1.3.1")
         .author("Peter Lesty <peter@parashift.com.au>")
         .about("Generate an Alfresco deployment with modules")
         .arg(Arg::with_name("yaml_file")
@@ -292,10 +292,6 @@ fn check_versions(url: &str, modules: Vec<AmpModule>, include_dev: bool) -> Vec<
 
         match response.status() {
             StatusCode::Ok => {
-
-                let mut response_body = String::new();
-
-                response.read_to_string(&mut response_body).expect("Could not read response");
 
                 let existing_version = get_version(&module.version);
 
