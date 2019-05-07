@@ -235,7 +235,7 @@ fn main() {
         let modules = get_yaml_string_list(&yaml, "alfresco_modules");
 
         if modules.len() > 0 {
-            if module_type.is_some() {
+            if let Some(ref mod_type) = module_type {
 
                 let url: String = matches.value_of("url")
                     .map(|url| String::from(url))
@@ -243,7 +243,7 @@ fn main() {
                     .unwrap_or(String::from("https://repo.parashift.com.au"));
 
 
-                files.append(&mut download_files(&modules, &module_type.unwrap(), &token.unwrap_or(String::from("")), &url));
+                files.append(&mut download_files(&modules, &mod_type, &token.unwrap_or(String::from("")), &url));
 
             } else {
                 println!("Skipping module download, no module type is set");
@@ -256,6 +256,10 @@ fn main() {
         }
 
         files.append(&mut get_yaml_string_list(&yaml, "files"));
+
+        if let Some(ref mod_type) = module_type {
+            files.append(&mut get_yaml_string_list(&yaml, &format!("amps_{}", mod_type)));
+        }
 
         output_files(files, &output_dir);
     }
